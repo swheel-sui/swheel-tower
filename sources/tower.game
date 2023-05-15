@@ -1,0 +1,79 @@
+module tower::tower {
+  use std::vector;
+
+  use sui::coin::{Self, Coin};
+  use sui::tx_context::{Self, TxContext};
+  use sui::balance;
+  use sui::event;
+  use sui::address;
+  use sui::object;
+
+  use tower::game::{Self, Game};
+  use tower::state::{Self, GameState};
+  use tower::difficulty::Difficulty;
+
+  use swheel::randomness::{Self, Randomness};
+
+  const ENoReachMinBet: u64 = 101;
+  const EExceedMaxBet: u64 = 102;
+  const EInvalidServerSig: u64 = 103;
+
+  struct GameStarted<phantom T> has drop, copy {
+    player: address,
+    difficulty: Difficulty,
+    bet: u64,
+  }
+  
+  struct GameEnded<phantom T> has drop, copy {
+    player: address,
+    difficulty: Difficulty,
+    bet: u64,
+    bonus: u64,
+  }
+  
+  public fun start<T>(game: &mut Game<T>, level: u64, bet: Coin<T>, randomness: Randomness, ctx: &mut TxContext): GameState<T> {
+    let balance = coin::into_balance(bet);
+    let bet_value = balance::value(&balance);
+
+    assert!(bet_value >= game::min_bet(game), ENoReachMinBet);
+    assert!(bet_value <= game::max_bet(game), EExceedMaxBet);
+
+    game::incr_balance(game, balance);
+
+    let reward = game::reward_value(game, bet_value);
+    let state = state::new(game, level, bet_value, reward, randomness, ctx);
+    game::send_reward(game, reward, ctx);
+
+    event::emit(GameStarted<T> {
+      player: tx_context::sender(ctx),
+      difficulty: state::difficulty(&state),
+      bet: state::bet(&state),
+    });
+
+    state
+  }
+
+  public fun end<T>(game: &mut Game<T>, state: GameState<T>, 
+    bonus: u64, signature: vector<u8>, ctx: &mut TxContext,
+  ): Randomness {
+    event::emit(GameEnded<T> {
+      player: tx_context::sender(ctx),
+      difficulty: state::difficulty(&state),
+      bet: state::bet(&state),
+      bonus,
+    });
+
+    let msg_bytes = &mut address::to_bytes(tx_context::sender(ctx));
+    vector::append(msg_bytes, object::id_to_bytes(object::borrow_id(&state)));
+    vector::append(msg_bytes, randomness::u64_to_bytes(bonus));
+
+    let randomness = state::delete(state);
+    randomness::verify_used(&mut randomness, msg_bytes, &signature);
+
+    if (bonus > 0) {
+      game::send_bonus(game, bonus, ctx);
+    };
+
+    randomness
+  }
+}
